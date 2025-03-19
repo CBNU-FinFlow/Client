@@ -16,6 +16,22 @@ import Collapse from '@mui/material/Collapse';
 import axiosInstance from '@/utils/axiosInstance';
 import { useCurrencyStore } from '@/app/store/currency';
 import { formatCurrency } from '@/utils/formatCurrency';
+import { usePortfolioStore } from '@/app/store/usePortfolioStore';
+import { Transaction } from '@/model/Transaction';
+
+// Currency 타입 정의
+type SupportedCurrency =
+  | 'USD'
+  | 'KRW'
+  | 'EUR'
+  | 'GBP'
+  | 'JPY'
+  | 'CAD'
+  | 'AUD'
+  | 'CNY'
+  | 'CHF'
+  | 'INR'
+  | 'SGD';
 
 const Page = () => {
   const [exchangeRates, setExchangeRates] = useState<Record<string, number>>({
@@ -37,7 +53,7 @@ const Page = () => {
   }, []);
 
   const [selectedItems, setSelectedItems] = useState<number[]>([]);
-  const [transactions, setTransactions] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [displayCurrency, setDisplayCurrency] = useState<
     'original' | 'converted'
   >('converted');
@@ -51,26 +67,65 @@ const Page = () => {
     setIsTransactionsDeleteModalOpen,
   } = useModalStore();
 
+  // 삭제할 단일 트랜잭션 ID를 위한 state 추가
+  const [singleDeleteId, setSingleDeleteId] = useState<number | null>(null);
+
+  // usePortfolioStore에서 선택된 포트폴리오 가져오기
+  const { selectedPortfolio } = usePortfolioStore();
+
+  // 상태 변수 추가
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [perPage, setPerPage] = useState<number>(10);
+  const [totalTransactions, setTotalTransactions] = useState<number>(0);
+
   const fetchTransactions = async () => {
+    // 선택된 포트폴리오가 없으면 데이터를 가져오지 않음
+    if (!selectedPortfolio) {
+      setTransactions([]);
+      return;
+    }
+
     try {
       const response = await axiosInstance.get('/transactions', {
-        params: { portfolio_id: 1, page: 1, per_page: 10 },
+        params: {
+          portfolio_id: selectedPortfolio.portfolio_id,
+          page: currentPage,
+          per_page: perPage,
+        },
       });
 
-      const mappedTransactions = response.data.data.map((tx: any) => ({
+      const mappedTransactions = response.data.data.map((tx: Transaction) => ({
         ...tx,
         currency: tx.currency_code,
         originalCurrency: tx.currency_code,
       }));
       setTransactions(mappedTransactions);
+      setTotalTransactions(response.data.total || mappedTransactions.length); // API에서 total을 제공하는 경우
     } catch (error) {
       console.error('거래 내역 불러오기 실패:', error);
     }
   };
 
+  // 추가: 페이지 변경 핸들러
+  const handlePageChange = (newPage: number) => {
+    setCurrentPage(newPage);
+  };
+
+  // 추가: 페이지당 항목 수 변경 핸들러
+  const handlePerPageChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    setPerPage(Number(event.target.value));
+    setCurrentPage(1);
+  };
+
+  // 의존성 배열에 currentPage와 perPage 추가
   useEffect(() => {
     fetchTransactions();
-  }, []);
+  }, [selectedPortfolio, currentPage, perPage]);
+
+  // 페이지네이션 관련 계산
+  const totalPages = Math.ceil(totalTransactions / perPage);
+  const startIndex = (currentPage - 1) * perPage + 1;
+  const endIndex = Math.min(startIndex + perPage - 1, totalTransactions);
 
   /**
    * 금액 환산 함수
@@ -155,7 +210,7 @@ const Page = () => {
   const getDisplayAmount = (amount: number, originalCurrency: string) => {
     if (displayCurrency === 'original') {
       // 구매 통화 그대로
-      return formatCurrency(amount, originalCurrency);
+      return formatCurrency(amount, originalCurrency as SupportedCurrency);
     } else {
       // 사용자 지정 통화로 환산
       const converted = convertAmount(
@@ -163,20 +218,20 @@ const Page = () => {
         originalCurrency,
         selectedCurrency
       );
-      return formatCurrency(converted, selectedCurrency);
+      return formatCurrency(converted, selectedCurrency as SupportedCurrency);
     }
   };
 
   // 구매 총액( converted 모드 시, 모든 통화를 하나로 합산 )
   const purchaseTotalConverted = Object.entries(purchaseTotals).reduce(
     (acc, [currency, total]) =>
-      acc + convertAmount(total, currency, selectedCurrency),
+      acc + convertAmount(total as number, currency, selectedCurrency),
     0
   );
   // 판매 총액( converted 모드 시, 모든 통화를 하나로 합산 )
   const saleTotalConverted = Object.entries(saleTotals).reduce(
     (acc, [currency, total]) =>
-      acc + convertAmount(total, currency, selectedCurrency),
+      acc + convertAmount(total as number, currency, selectedCurrency),
     0
   );
 
@@ -203,21 +258,22 @@ const Page = () => {
       {/* (기존) 모달들 */}
       {isInvestmentsModalOpen && (
         <AddInvestmentsModal
-          portfolioId={1}
-          onAdditionSuccess={() => window.location.reload()}
+          selectedProduct={null}
+          onSuccess={() => fetchTransactions()}
         />
       )}
       {isTransactionsDeleteModalOpen && (
         <DeleteTransactionsModal
-          selectedItems={selectedItems}
+          selectedItems={singleDeleteId ? [singleDeleteId] : selectedItems}
           onDeletionSuccess={() => {
             setSelectedItems([]);
+            setSingleDeleteId(null);
             fetchTransactions();
           }}
         />
       )}
 
-      <div className='p-10 bg-white rounded-2xl shadow-xl'>
+      <div className='p-10 bg-white rounded-2xl shadow-xl mb-7'>
         {/* "추가" 버튼을 상단에 배치 */}
         <button
           className='bg-[#e1f0ff] hover:bg-[#3699ff] text-[#3699ff] hover:text-white flex justify-center items-center gap-1 px-3.5 py-2 text-sm rounded-[0.5rem] transition-all mb-4'
@@ -241,7 +297,10 @@ const Page = () => {
                       Object.entries(purchaseTotals).map(
                         ([currency, total]) => (
                           <p key={currency} className='text-slate-700'>
-                            {formatCurrency(total, currency)}
+                            {formatCurrency(
+                              total,
+                              currency as SupportedCurrency
+                            )}
                           </p>
                         )
                       )
@@ -249,7 +308,7 @@ const Page = () => {
                       <p className='text-slate-700'>
                         {formatCurrency(
                           purchaseTotalConverted,
-                          selectedCurrency
+                          selectedCurrency as SupportedCurrency
                         )}
                       </p>
                     )}
@@ -265,12 +324,15 @@ const Page = () => {
                     {displayCurrency === 'original' ? (
                       Object.entries(saleTotals).map(([currency, total]) => (
                         <p key={currency} className='text-slate-700'>
-                          {formatCurrency(total, currency)}
+                          {formatCurrency(total, currency as SupportedCurrency)}
                         </p>
                       ))
                     ) : (
                       <p className='text-slate-700'>
-                        {formatCurrency(saleTotalConverted, selectedCurrency)}
+                        {formatCurrency(
+                          saleTotalConverted,
+                          selectedCurrency as SupportedCurrency
+                        )}
                       </p>
                     )}
                   </div>
@@ -433,7 +495,7 @@ const Page = () => {
                       : currency;
                   totalProfitDisplay = formatCurrency(
                     profitConverted,
-                    showCurrency
+                    showCurrency as SupportedCurrency
                   );
 
                   if (totalProfitRate != null) {
@@ -552,7 +614,7 @@ const Page = () => {
                       <button
                         className='p-2 bg-[#FFE2E5] hover:bg-[#F64E60] text-[#f64e60] hover:text-white rounded-[0.5rem] transition-all'
                         onClick={() => {
-                          setSelectedItems([transaction_id]);
+                          setSingleDeleteId(transaction_id);
                           setIsTransactionsDeleteModalOpen(true);
                         }}
                       >
@@ -586,7 +648,10 @@ const Page = () => {
                             : 'text-red-500'
                         }`}
                       >
-                        {formatCurrency(totalProfitAll, uniqueCurrencies[0])}
+                        {formatCurrency(
+                          totalProfitAll,
+                          uniqueCurrencies[0] as SupportedCurrency
+                        )}
                       </span>
                     )
                   ) : (
@@ -597,7 +662,10 @@ const Page = () => {
                           : 'text-red-500'
                       }`}
                     >
-                      {formatCurrency(totalProfitConverted, selectedCurrency)}
+                      {formatCurrency(
+                        totalProfitConverted,
+                        selectedCurrency as SupportedCurrency
+                      )}
                     </span>
                   )}
                 </td>
@@ -607,32 +675,76 @@ const Page = () => {
           </table>
         </div>
 
-        {/* 페이지네이션 (기존 예시) */}
+        {/* 페이지네이션 */}
         <div className='flex justify-between mt-6'>
           <div className='flex flex-row gap-2'>
-            <button className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'>
+            <button
+              className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'
+              onClick={() => handlePageChange(1)}
+              disabled={currentPage === 1}
+            >
               <ChevronsLeft width={16} height={16} />
             </button>
-            <button className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'>
+            <button
+              className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'
+              onClick={() => handlePageChange(currentPage - 1)}
+              disabled={currentPage === 1}
+            >
               <ChevronLeft width={16} height={16} />
             </button>
-            <button className='w-8 h-8 text-sm text-white bg-[#3699ff] flex justify-center items-center rounded-md'>
-              1
-            </button>
-            <button className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'>
+
+            {Array.from({ length: Math.min(totalPages, 5) }, (_, i) => {
+              const pageToShow =
+                totalPages <= 5
+                  ? i + 1
+                  : currentPage <= 3
+                  ? i + 1
+                  : currentPage >= totalPages - 2
+                  ? totalPages - 4 + i
+                  : currentPage - 2 + i;
+              return (
+                <button
+                  key={pageToShow}
+                  className={`w-8 h-8 text-sm ${
+                    currentPage === pageToShow
+                      ? 'text-white bg-[#3699ff]'
+                      : 'text-slate-700 bg-slate-100 hover:bg-slate-200'
+                  } flex justify-center items-center rounded-md transition-all`}
+                  onClick={() => handlePageChange(pageToShow)}
+                >
+                  {pageToShow}
+                </button>
+              );
+            })}
+
+            <button
+              className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'
+              onClick={() => handlePageChange(currentPage + 1)}
+              disabled={currentPage === totalPages}
+            >
               <ChevronRight width={16} height={16} />
             </button>
-            <button className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'>
+            <button
+              className='w-8 h-8 text-sm text-slate-700 bg-slate-100 hover:bg-slate-200 flex justify-center items-center rounded-md transition-all'
+              onClick={() => handlePageChange(totalPages)}
+              disabled={currentPage === totalPages}
+            >
               <ChevronsRight width={16} height={16} />
             </button>
           </div>
           <div className='flex flex-row items-center gap-4'>
-            <select className='px-4 py-2 text-slate-700 bg-slate-100 text-sm rounded-md'>
-              <option>10</option>
-              <option>25</option>
-              <option>50</option>
+            <select
+              className='px-4 py-2 text-slate-700 bg-slate-100 text-sm rounded-md'
+              value={perPage}
+              onChange={handlePerPageChange}
+            >
+              <option value={10}>10</option>
+              <option value={25}>25</option>
+              <option value={50}>50</option>
             </select>
-            <span className='text-slate-700 text-sm'>2개 중 1-2 보기</span>
+            <span className='text-slate-700 text-sm'>
+              {totalTransactions}개 중 {startIndex}-{endIndex} 보기
+            </span>
           </div>
         </div>
       </div>
